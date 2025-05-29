@@ -6,6 +6,8 @@ load_dotenv()
 import requests
 import json
 import operator
+from google import genai
+from google.genai import types
 
 class OllamaModel:
     def __init__(self, model, system_prompt, temperature=0, stop=None):
@@ -63,6 +65,135 @@ class OllamaModel:
         except requests.RequestException as e:
             response = {"error": f"Error in invoking model! {str(e)}"}
             return response
+        
+
+class GeminiModel:
+    def __init__(self, system_prompt, temperature=0, stop=None):
+        """
+        Initializes the GeminiModel with the given parameters using the Gemini SDK.
+
+        Parameters:
+        model (str): The name of the Gemini model to use (e.g., "gemini-pro", "gemini-1.5-flash").
+        system_prompt (str): The system prompt to guide the model's behavior.
+        api_key (str): Your Google Cloud API key for accessing Gemini.
+                       It's recommended to load this from an environment variable for security.
+        temperature (float): The temperature setting for the model (0.0 to 1.0).
+                             Higher values make the output more random.
+        stop (str or list of str, optional): A stop sequence or a list of stop sequences.
+                                            The model will stop generating text when it encounters any of these.
+        """
+        self.system_prompt = system_prompt
+        self.temperature = temperature
+        self.stop = stop
+
+
+        # Configure the Gemini API with the provided API key
+        # It's best practice to load API keys from environment variables:
+        # genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+        API_KEY = os.getenv("GEMINI_API_KEY")
+
+        # Initialize the generative model
+        self.model = genai.Client(vertexai=False, api_key=API_KEY)
+
+    def generate_text(self, prompt):
+        """
+        Generates a response from the Gemini model based on the provided prompt.
+        It attempts to parse the response as JSON, similar to the OllamaModel.
+
+        Parameters:
+        prompt (str): The user query to generate a response for.
+
+        Returns:
+        dict: The response from the model as a dictionary.
+              Returns an error dictionary if the API call fails or JSON parsing fails.
+        """
+        try:
+            # Construct the content for the model.
+            # To emulate Ollama's 'system' parameter and ensure JSON output,
+            # we combine the system prompt, a JSON output instruction, and the user's prompt
+            # into the 'user' role's content parts.
+            
+            # Instruction to ensure the model outputs JSON
+            json_output_instruction = "Please provide the response as a JSON object"
+
+            full_content_parts = []
+            if self.system_prompt:
+                full_content_parts.append(self.system_prompt)
+            
+            full_content_parts.append(json_output_instruction)
+            full_content_parts.append(prompt)
+
+            # The `contents` list represents the conversation turn.
+            # For a single-turn interaction mirroring the Ollama template,
+            # we pass a list containing one user message.
+            # contents = [
+            #     {"role": "user", "parts": full_content_parts}
+            # ]
+            contents = types.Content(
+                role='user',
+                parts=[types.Part.from_text(text="".join(full_content_parts))]
+            )
+
+            # Define generation configuration parameters
+            # generation_config = {
+            #     "temperature": self.temperature,
+            #     # You might add other parameters here if needed, e.g.:
+            #     # "top_p": 0.95,
+            #     # "top_k": 0.0,
+            #     # "max_output_tokens": 8192,
+            # }
+            model_config = types.GenerateContentConfig(
+                system_instruction=self.system_prompt,
+                # max_output_tokens=8192,
+                max_output_tokens=1024,
+                temperature=float(self.temperature),
+                top_k=0.0,
+                top_p=0.95,
+            ),
+
+            # print(f"Sending prompt to Gemini model: {full_content_parts}")
+
+            # Make the API call to generate content
+            response = self.model.models.generate_content(
+                model="gemini-2.0-flash-001",
+                contents=contents,
+                # config=model_config
+            )
+
+            # Access the text from the response object
+            response_text = response.text
+            # print("RAW GEMINI RESPONSE TEXT:", response_text)
+
+                        # Strip markdown code fences if present
+            if response_text.startswith("```json"):
+                response_text = response_text[len("```json"):]
+            if response_text.startswith("```"): # Handle cases where only ``` is present before json
+                response_text = response_text[len("```"):]
+            if response_text.endswith("```"):
+                response_text = response_text[:-len("```")]
+            
+            response_text = response_text.strip() # Clean up any leading/trailing whitespace
+
+            # print(response_text)
+
+            # Attempt to parse the response text as a JSON dictionary
+            ## 
+            response_dict = json.loads(response_text)
+
+            # print(f"\n\nResponse from Gemini model: {response_dict}")
+
+            return response_dict
+
+        except json.JSONDecodeError as e:
+            # Handle cases where the model's response is not valid JSON
+            error_message = f"Error parsing Gemini model response as JSON: {str(e)}"
+            print(error_message)
+            return {"error": error_message, "raw_response": response_text}
+        except Exception as e:
+            # Catch any other exceptions during the API call or processing
+            error_message = f"Error in invoking Gemini model: {str(e)}"
+            print(error_message)
+            return {"error": error_message}
         
 def basic_calculator(input_str):
     """
@@ -259,7 +390,7 @@ Remember: Your response must ALWAYS be valid JSON with "tool_choice" and "tool_i
 """
 
 class Agent:
-    def __init__(self, tools, model_service, model_name, stop=None):
+    def __init__(self, tools):
         """
         Initializes the agent with a list of tools and a model.
 
@@ -269,9 +400,6 @@ class Agent:
         model_name (str): The name of the model to use.
         """
         self.tools = tools
-        self.model_service = model_service
-        self.model_name = model_name
-        self.stop = stop
 
     def prepare_tools(self):
         """
@@ -300,20 +428,9 @@ class Agent:
 
         # Create an instance of the model service with the system prompt
 
-        if self.model_service == OllamaModel:
-            model_instance = self.model_service(
-                model=self.model_name,
-                system_prompt=agent_system_prompt,
-                temperature=0,
-                stop=self.stop
-            )
-        else:
-            model_instance = self.model_service(
-                model=self.model_name,
-                system_prompt=agent_system_prompt,
-                temperature=0
-            )
-
+       
+        model_instance = GeminiModel(agent_system_prompt)
+        
         # Generate and return the response dictionary
         agent_response_dict = model_instance.generate_text(prompt)
         return agent_response_dict
@@ -329,6 +446,7 @@ class Agent:
         The response from executing the appropriate tool or the tool_input if no matching tool is found.
         """
         agent_response_dict = self.think(prompt)
+        # print(f" Agent response dict: ${agent_response_dict}")
         tool_choice = agent_response_dict.get("tool_choice")
         tool_input = agent_response_dict.get("tool_input")
 
@@ -341,7 +459,7 @@ class Agent:
         print(colored(tool_input, 'cyan'))
         return
     
-    # Example usage
+# Example usage
 if __name__ == "__main__":
     """
     Instructions for using this agent:
@@ -370,17 +488,10 @@ if __name__ == "__main__":
 
     tools = [basic_calculator, reverse_string]
 
-    # Uncomment below to run with OpenAI
-    # model_service = OpenAIModel
-    # model_name = 'gpt-3.5-turbo'
-    # stop = None
-
     # Using Ollama with llama2 model
-    model_service = OllamaModel
-    model_name = "llama2"  # Can be changed to other models like 'mistral', 'codellama', etc.
-    stop = "<|eot_id|>"
+    model_service = GeminiModel("")
 
-    agent = Agent(tools=tools, model_service=model_service, model_name=model_name, stop=stop)
+    agent = Agent(tools=tools)
 
     print("\nWelcome to the AI Agent! Type 'exit' to quit.")
     print("You can ask me to:")
